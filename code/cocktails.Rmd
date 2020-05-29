@@ -1,0 +1,132 @@
+---
+title: "Predicting cocktail categories with tidymodels and textrecipes"
+author: "Jamie Ralph"
+date: "29/05/2020"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(tidymodels)
+library(textrecipes)
+library(vip)
+
+```
+
+## Load the data, create binary category, and collapse ingredients
+
+```{r}
+boston_cocktails <- readr::read_csv('https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2020/2020-05-26/boston_cocktails.csv')
+
+cocktails_parsed <- boston_cocktails %>%
+    mutate(category = case_when(category != "Cocktail Classics" ~ "other",
+                                TRUE ~ "classic")) %>%
+    group_by(category, name) %>%
+    summarise(ingredient = toString(ingredient)) %>%
+    mutate(ingredient = str_to_lower(ingredient)) %>%
+    ungroup() %>%
+    select(category, ingredient)
+```
+
+## Prepare train and test sets
+
+```{r}
+set.seed(123)
+
+cocktails_split <- initial_split(cocktails_parsed, p = 0.8, strata = category)
+
+cocktails_train <- training(cocktails_split)
+cocktails_test <- testing(cocktails_split)
+```
+
+## Prepare classification recipe
+
+```{r}
+cocktails_recipe <- recipe(category ~ ingredient, data = cocktails_train) %>%
+    step_tokenize(ingredient) %>%
+    step_stopwords(ingredient) %>%
+    step_tfidf(ingredient) %>%
+    step_normalize(all_predictors())
+
+cocktails_prep <- prep(cocktails_recipe)
+```
+
+## Define lasso regression specification and model workflow
+
+```{r}
+lasso_spec <- logistic_reg(penalty = tune(), mixture = 1) %>%
+    set_engine("glmnet")
+
+lasso_wf <- workflow() %>%
+    add_recipe(cocktails_recipe) %>%
+    add_model(lasso_spec)
+```
+
+## Define bootstrap resampling, tune model, and visualise results
+
+```{r}
+lambda_grid <- grid_regular(penalty(), levels = 50)
+
+cocktail_folds <- bootstraps(cocktails_train, strata = category)
+
+lasso_grid <- tune_grid(
+    lasso_wf,
+    resamples = cocktail_folds,
+    grid = lambda_grid,
+    metrics = metric_set(roc_auc, ppv, npv)
+)
+
+bstrap_results <- lasso_grid %>%
+    collect_metrics() %>%
+    ggplot(aes(penalty, mean, color = .metric)) +
+    geom_line(size = 1.5, show.legend = FALSE) +
+    facet_wrap(~.metric) +
+    scale_x_log10()
+
+bstrap_results
+
+```
+
+## Finalise the workflow with best AUC and pull out important variables
+
+```{r}
+best_auc <- lasso_grid %>%
+    select_best("roc_auc")
+
+final_lasso <- finalize_workflow(lasso_wf, best_auc)
+
+vi_plot <- final_lasso %>%
+    fit(cocktails_train) %>%
+    pull_workflow_fit() %>%
+    vi(lambda = best_auc$penalty) %>%
+    group_by(Sign) %>%
+    top_n(20, wt = abs(Importance)) %>%
+    ungroup() %>%
+    mutate(
+        Importance = abs(Importance),
+        Variable = str_remove(Variable, "tfidf_ingredient_"),
+        Variable = fct_reorder(Variable, Importance)
+    ) %>%
+    ggplot(aes(x = Importance, y = Variable, fill = Sign)) +
+    geom_col(show.legend = FALSE) +
+    facet_wrap(~Sign, scales = "free_y") +
+    labs(y = NULL)
+
+vi_plot
+```
+
+## Use last fit on test set and collect metrics
+
+```{r}
+cocktails_final <- last_fit(final_lasso, cocktails_split)
+
+cocktails_final %>% 
+    collect_metrics()
+
+cocktails_final %>% 
+    collect_predictions() %>%
+    conf_mat(category, .pred_class)
+```
+
