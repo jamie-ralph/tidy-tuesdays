@@ -94,5 +94,5 @@ p1 + p2 + p3 + p4 + p5 + grob_1 +
           text = element_text(colour = "#02040f", family = "Playfair Display"),
           plot.title = element_text(size = 30, face = "bold"))
  
- ggsave(paste0(here::here("images"), "/toronto-shelters.png"), width = 40, height = 20, units = "cm")
+ggsave(paste0(here::here("images"), "/toronto-shelters.png"), width = 40, height = 20, units = "cm")
 
